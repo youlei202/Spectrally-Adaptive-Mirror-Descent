@@ -1,0 +1,19 @@
+name: 05_large_scale
+seed: 123
+data:
+  name: synthetic_regression
+  n_samples: 8000
+  n_features: 800
+  noise: 0.15
+  condition_number: 80.0
+loss:
+  name: squared
+  l2_reg: 1e-2
+optimizer:
+  name: sgd
+  lr: 0.2
+  momentum: 0.5
+train:
+  epochs: 2
+  batch_size: 256
+  domain_diameter: 8.0

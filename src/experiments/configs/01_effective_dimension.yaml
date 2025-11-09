@@ -1,0 +1,22 @@
+name: 01_effective_dimension
+seed: 0
+data:
+  name: synthetic_regression
+  n_samples: 2000
+  n_features: 200
+  noise: 0.05
+  condition_number: 30.0
+loss:
+  name: squared
+  l2_reg: 1e-3
+optimizer:
+  name: samd_ss
+  sketch_type: frequent_directions
+  sketch_rank: 32
+  eta: 0.8
+  lambda_reg: 1e-2
+  epsilon: 0.1
+train:
+  epochs: 2
+  batch_size: 128
+  domain_diameter: 5.0

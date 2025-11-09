@@ -1,0 +1,22 @@
+name: 02_sketch_inflation
+seed: 42
+data:
+  name: synthetic_regression
+  n_samples: 4000
+  n_features: 500
+  noise: 0.1
+  condition_number: 50.0
+loss:
+  name: squared
+  l2_reg: 5e-4
+optimizer:
+  name: samd_ss
+  sketch_type: randomized_svd
+  sketch_rank: 48
+  eta: 0.6
+  lambda_reg: 5e-3
+  epsilon: 0.15
+train:
+  epochs: 3
+  batch_size: 256
+  domain_diameter: 6.0

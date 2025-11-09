@@ -1,0 +1,20 @@
+name: 03_fast_rates
+seed: 7
+data:
+  name: synthetic_logistic
+  n_samples: 5000
+  n_features: 100
+loss:
+  name: logistic
+  l2_reg: 1e-2
+optimizer:
+  name: samd_ss
+  sketch_type: oja
+  sketch_rank: 32
+  eta: 0.4
+  lambda_reg: 1e-2
+  epsilon: 0.2
+train:
+  epochs: 4
+  batch_size: 64
+  domain_diameter: 4.0

@@ -1,0 +1,15 @@
+name: 04_stability_generalization
+seed: 21
+data:
+  name: breast_cancer
+  test_size: 0.25
+loss:
+  name: logistic
+  l2_reg: 5e-3
+optimizer:
+  name: adagrad_diag
+  lr: 0.5
+train:
+  epochs: 6
+  batch_size: 64
+  domain_diameter: 3.0
