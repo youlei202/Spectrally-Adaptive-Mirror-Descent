@@ -11,11 +11,11 @@ def test_end_to_end_training(tmp_path: Path):
         "loss": {"name": "squared", "l2_reg": 1e-3},
         "optimizer": {
             "name": "samd_ss",
-            "sketch_type": "frequent_directions",
-            "sketch_rank": 4,
-            "eta": 0.5,
-            "lambda_reg": 1e-2,
+            "lambda_reg": 1.0,
             "epsilon": 0.2,
+            "step_schedule": {"type": "inverse_sqrt", "eta0": 0.5},
+            "sketch": {"name": "frequent_directions", "rank": 4, "ridge": 1e-3},
+            "constraint": {"type": "l2_ball", "radius": 1.0},
         },
         "train": {"epochs": 1, "batch_size": 16, "domain_diameter": 2.0},
     }

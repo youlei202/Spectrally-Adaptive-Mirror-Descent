@@ -5,14 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Callable, Dict, Iterable, Tuple
 
 import numpy as np
 
 from src.algorithms.adagrad_diag import AdaGradDiag
 from src.algorithms.adagrad_full import AdaGradFull
 from src.algorithms.ons_diag import ONSDiag
-from src.algorithms.samd_ss import SAMDSS, SAMDSSConfig
+from src.algorithms.samd_ss import SAMDSS
 from src.algorithms.sgd import SGD
 from src.data import real, synthetic
 from src.losses.logistic import LogisticLoss
@@ -20,11 +20,19 @@ from src.losses.squared import SquaredLoss
 from src.metrics import logdet, regret, stability
 from src.utils import config as config_utils
 from src.utils import logging as logging_utils
-from src.utils import projections
 from src.utils.reproducibility import set_global_seeds
+
+from src.sketches.frequent_directions import FrequentDirections
+from src.sketches.oja_sketch import OjaSketch
+from src.sketches.randomized_svd_stream import RandomizedSVDStream
 
 
 LOGGER = logging_utils.get_logger("run_experiment")
+SKETCH_REGISTRY = {
+    "frequent_directions": FrequentDirections,
+    "oja": OjaSketch,
+    "randomized_svd": RandomizedSVDStream,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,16 +104,44 @@ def build_optimizer(cfg: Dict, dimension: int):
             alpha=algo_cfg.get("alpha", 1.0),
         )
     if name == "samd_ss":
-        samd_cfg = SAMDSSConfig(
-            dimension=dimension,
-            sketch_type=algo_cfg.get("sketch_type", "frequent_directions"),
-            sketch_rank=algo_cfg.get("sketch_rank", min(64, dimension)),
-            eta=algo_cfg.get("eta", 1.0),
-            lambda_reg=algo_cfg.get("lambda_reg", 1e-3),
-            epsilon=algo_cfg.get("epsilon", 0.1),
+        schedule = build_step_schedule(algo_cfg)
+        sketch_cfg = algo_cfg.get("sketch", {"name": "frequent_directions"})
+        sketch_name = sketch_cfg.get("name")
+        if sketch_name not in SKETCH_REGISTRY:
+            raise ValueError(f"Unknown sketch backend {sketch_name}")
+        sketch_cls = SKETCH_REGISTRY[sketch_name]
+        sketch_kwargs = {k: v for k, v in sketch_cfg.items() if k != "name"}
+        return SAMDSS(
+            dim=dimension,
+            lambda_ridge=algo_cfg.get("lambda_reg", 1.0),
+            step_schedule=schedule,
+            sketch_backend=sketch_cls,
+            sketch_kwargs=sketch_kwargs,
+            constraint=algo_cfg.get("constraint"),
+            alpha_strong_convexity=algo_cfg.get("alpha_strong_convexity"),
         )
-        return SAMDSS(samd_cfg)
     raise ValueError(f"Unknown optimizer {name}")
+
+
+def build_step_schedule(algo_cfg: Dict) -> Callable[[int], float]:
+    sched_cfg = algo_cfg.get("step_schedule", {"type": "inverse_sqrt", "eta0": 1.0})
+    sched_type = sched_cfg.get("type", "inverse_sqrt")
+    eta0 = float(sched_cfg.get("eta0", 1.0))
+
+    if sched_type == "inverse_sqrt":
+        def schedule(t: int) -> float:
+            return eta0 / np.sqrt(max(t, 1))
+        return schedule
+    if sched_type == "constant":
+        def schedule(_: int) -> float:
+            return eta0
+        return schedule
+    if sched_type == "strong_convexity":
+        alpha = float(sched_cfg.get("alpha", algo_cfg.get("alpha_strong_convexity", 1.0)))
+        def schedule(t: int) -> float:
+            return 1.0 / (alpha * max(t, 1))
+        return schedule
+    raise ValueError(f"Unknown step schedule type: {sched_type}")
 
 
 def iterate_minibatches(
@@ -126,29 +162,27 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
     weights = np.zeros(X.shape[1])
     history = [weights.copy()]
     gram = np.zeros((X.shape[1], X.shape[1]))
-    potentials = []
+    potentials: list[float] = []
     train_losses = []
+    track_potential = bool(getattr(optimizer, "supports_potential", False))
 
     train_cfg = cfg["train"]
     num_epochs = train_cfg.get("epochs", 1)
     batch_size = train_cfg.get("batch_size", len(X))
-    domain_radius = train_cfg.get(
-        "domain_radius", train_cfg.get("domain_diameter", 1.0) / 2.0
-    )
-    enforce_projection = train_cfg.get("enforce_projection", True)
 
     for epoch in range(num_epochs):
         for batch_x, batch_y in iterate_minibatches(X, y, batch_size, rng):
             grad = loss_fn.grad(weights, batch_x, batch_y)
             gram += np.outer(grad, grad)
             weights, info = optimizer.update(weights, grad)
-            if enforce_projection and domain_radius > 0:
-                weights = projections.project_l2_ball(weights, domain_radius)
-            potentials.append(info.get("elliptical_potential", float(grad @ grad)))
+            if track_potential and info.get("elliptical_potential") is not None:
+                potentials.append(info["elliptical_potential"])
             batch_loss = loss_fn.loss(weights, batch_x, batch_y)
             train_losses.append(batch_loss)
             history.append(weights.copy())
         LOGGER.info("Epoch %d done. Latest loss=%.4f", epoch + 1, train_losses[-1])
+
+    observed_regret = float(np.sum(train_losses - train_losses[-1]))
 
     metrics = summarize_metrics(
         cfg=cfg,
@@ -159,6 +193,7 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
         extras=extras,
         loss_fn=loss_fn,
         final_weights=weights,
+        observed_regret=observed_regret,
     )
     save_summary(metrics, artifacts_dir)
     return metrics
@@ -173,12 +208,25 @@ def summarize_metrics(
     extras: Dict[str, np.ndarray],
     loss_fn,
     final_weights: np.ndarray,
+    observed_regret: float,
 ) -> Dict:
-    epsilon = float(cfg["optimizer"].get("epsilon", 0.1))
-    lambda_reg = float(cfg["optimizer"].get("lambda_reg", 1e-3))
-    logdet_value = logdet.logdet_ratio(gram, lambda_reg)
-    sum_potential = float(np.sum(potentials))
-    ellip_ok = logdet.elliptical_potential_check(sum_potential, logdet_value, epsilon)
+    epsilon = cfg["optimizer"].get("epsilon")
+    lambda_reg = cfg["optimizer"].get("lambda_reg")
+    logdet_value = logdet.logdet_ratio(gram, float(lambda_reg if lambda_reg is not None else 1.0))
+
+    sum_potential = None
+    ellip_ok = None
+    regret_result = None
+    if potentials.size > 0 and epsilon is not None and lambda_reg is not None:
+        sum_potential = float(np.sum(potentials))
+        ellip_ok = logdet.elliptical_potential_check(sum_potential, logdet_value, float(epsilon))
+        regret_result = regret.instance_regret_bound(
+            domain_diameter=float(cfg["train"].get("domain_diameter", 1.0)),
+            lambda_reg=float(lambda_reg),
+            epsilon=float(epsilon),
+            logdet_ratio=logdet_value,
+            observed_regret=observed_regret,
+        )
 
     if extras:
         test_X = extras["test_features"]
@@ -187,21 +235,13 @@ def summarize_metrics(
     else:
         test_loss = train_losses[-1]
 
-    regret_result = regret.instance_regret_bound(
-        domain_diameter=float(cfg["train"].get("domain_diameter", 1.0)),
-        lambda_reg=lambda_reg,
-        epsilon=epsilon,
-        logdet_ratio=logdet_value,
-        observed_regret=float(np.sum(train_losses) - len(train_losses) * train_losses.min()),
-    )
-
     metrics = {
         "experiment": cfg["name"],
-        "elliptical_potential_ok": bool(ellip_ok),
+        "elliptical_potential_ok": None if ellip_ok is None else bool(ellip_ok),
         "sum_potential": sum_potential,
         "logdet_value": logdet_value,
-        "regret_bound": regret_result.bound,
-        "regret_satisfied": bool(regret_result.satisfied),
+        "regret_bound": None if regret_result is None else regret_result.bound,
+        "regret_satisfied": None if regret_result is None else bool(regret_result.satisfied),
         "stability": stability.path_stability(weights_history),
         "generalization_gap": stability.generalization_gap(
             train_losses, np.array([test_loss])

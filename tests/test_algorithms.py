@@ -1,19 +1,23 @@
 import numpy as np
 
 from src.algorithms.adagrad_diag import AdaGradDiag
-from src.algorithms.samd_ss import SAMDSS, SAMDSSConfig
+from src.algorithms.samd_ss import SAMDSS
 from src.algorithms.sgd import SGD
+from src.sketches.frequent_directions import FrequentDirections
 
 
 def test_samd_ss_produces_finite_update():
-    cfg = SAMDSSConfig(
-        dimension=4,
-        sketch_type="frequent_directions",
-        sketch_rank=2,
-        eta=0.5,
-        lambda_reg=1e-2,
+    def schedule(t: int) -> float:
+        return 0.5 / np.sqrt(max(t, 1))
+
+    opt = SAMDSS(
+        dim=4,
+        lambda_ridge=1.0,
+        step_schedule=schedule,
+        sketch_backend=FrequentDirections,
+        sketch_kwargs={"rank": 2, "ridge": 1e-3},
+        constraint={"type": "l2_ball", "radius": 5.0},
     )
-    opt = SAMDSS(cfg)
     w = np.zeros(4)
     grad = np.array([1.0, -0.5, 0.25, 0.75])
 

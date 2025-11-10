@@ -14,7 +14,11 @@ class FrequentDirections:
         self.dimension = int(dimension)
         self.rank = int(rank)
         self.ridge = float(ridge)
-        self.buffer = np.zeros((rank, dimension))
+        self.buffer = np.zeros((self.rank, self.dimension))
+        self.next_row = 0
+
+    def reset(self) -> None:
+        self.buffer.fill(0.0)
         self.next_row = 0
 
     def update(self, gradient: np.ndarray) -> None:
@@ -38,3 +42,8 @@ class FrequentDirections:
 
     def metric(self) -> np.ndarray:
         return self.covariance() + self.ridge * np.eye(self.dimension)
+
+    def factor(self) -> np.ndarray:
+        if self.rank == 0:
+            return np.zeros((self.dimension, 0))
+        return self.buffer.T

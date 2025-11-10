@@ -11,11 +11,18 @@ loss:
   l2_reg: 1e-3
 optimizer:
   name: samd_ss
-  sketch_type: frequent_directions
-  sketch_rank: 32
-  eta: 0.8
-  lambda_reg: 1e-2
+  lambda_reg: 1000.0
   epsilon: 0.1
+  step_schedule:
+    type: inverse_sqrt
+    eta0: 0.6
+  sketch:
+    name: frequent_directions
+    rank: 32
+    ridge: 1e-3
+  constraint:
+    type: l2_ball
+    radius: 2.5
 train:
   epochs: 2
   batch_size: 128

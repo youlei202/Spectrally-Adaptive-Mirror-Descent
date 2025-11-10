@@ -9,11 +9,18 @@ loss:
   l2_reg: 1e-2
 optimizer:
   name: samd_ss
-  sketch_type: oja
-  sketch_rank: 32
-  eta: 0.4
-  lambda_reg: 1e-2
-  epsilon: 0.2
+  lambda_reg: 100000.0
+  epsilon: 0.1
+  step_schedule:
+    type: strong_convexity
+    alpha: 0.5
+  sketch:
+    name: oja
+    rank: 32
+    step_size: 0.05
+  constraint:
+    type: l2_ball
+    radius: 2.0
 train:
   epochs: 4
   batch_size: 64

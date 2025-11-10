@@ -11,11 +11,18 @@ loss:
   l2_reg: 5e-4
 optimizer:
   name: samd_ss
-  sketch_type: randomized_svd
-  sketch_rank: 48
-  eta: 0.6
-  lambda_reg: 5e-3
+  lambda_reg: 5000.0
   epsilon: 0.15
+  step_schedule:
+    type: inverse_sqrt
+    eta0: 0.4
+  sketch:
+    name: randomized_svd
+    rank: 48
+    ridge: 1e-2
+  constraint:
+    type: l2_ball
+    radius: 3.0
 train:
   epochs: 3
   batch_size: 256

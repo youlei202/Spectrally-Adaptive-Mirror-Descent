@@ -11,8 +11,8 @@ loss:
   l2_reg: 1e-2
 optimizer:
   name: sgd
-  lr: 0.2
-  momentum: 0.5
+  lr: 0.01
+  momentum: 0.3
 train:
   epochs: 2
   batch_size: 256

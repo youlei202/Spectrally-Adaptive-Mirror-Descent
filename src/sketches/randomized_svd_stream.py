@@ -22,9 +22,16 @@ class RandomizedSVDStream:
         self.dimension = int(dimension)
         self.rank = int(rank)
         self.ridge = float(ridge)
-        rng = set_global_seeds(seed)
-        self.test_matrix = rng.normal(size=(dimension, rank))
-        self.sketch = np.zeros((rank, dimension))
+        self.seed = seed
+        self._init_storage()
+
+    def _init_storage(self) -> None:
+        rng = set_global_seeds(self.seed)
+        self.test_matrix = rng.normal(size=(self.dimension, self.rank))
+        self.sketch = np.zeros((self.rank, self.dimension))
+
+    def reset(self) -> None:
+        self._init_storage()
 
     def update(self, gradient: np.ndarray) -> None:
         if gradient.shape != (self.dimension,):
@@ -41,3 +48,6 @@ class RandomizedSVDStream:
 
     def metric(self) -> np.ndarray:
         return self.covariance() + self.ridge * np.eye(self.dimension)
+
+    def factor(self) -> np.ndarray:
+        return self.sketch.T
