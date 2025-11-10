@@ -11,7 +11,9 @@ loss:
   l2_reg: 1e-3
 optimizer:
   name: samd_ss
-  lambda_reg: 1000.0
+  lambda_auto:
+    batches: 10
+    factor: 2.0
   epsilon: 0.1
   step_schedule:
     type: inverse_sqrt

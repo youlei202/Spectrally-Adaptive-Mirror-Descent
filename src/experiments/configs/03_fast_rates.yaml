@@ -9,7 +9,9 @@ loss:
   l2_reg: 1e-2
 optimizer:
   name: samd_ss
-  lambda_reg: 100000.0
+  lambda_auto:
+    batches: 20
+    factor: 2.0
   epsilon: 0.1
   step_schedule:
     type: strong_convexity

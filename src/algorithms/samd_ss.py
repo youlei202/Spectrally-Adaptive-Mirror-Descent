@@ -169,6 +169,14 @@ class SAMDSS:
         )
         return chol.T
 
+    def approximate_covariance(self) -> np.ndarray:
+        """Return the current sketch-based covariance approximation."""
+
+        B = self._sketch_factor()
+        if B.size == 0:
+            return np.zeros((self.dim, self.dim))
+        return B @ B.T
+
     # ------------------------------------------------------------------ #
     # Compatibility helpers
     # ------------------------------------------------------------------ #

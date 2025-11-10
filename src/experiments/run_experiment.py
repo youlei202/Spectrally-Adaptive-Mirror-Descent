@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Tuple
+import copy
 
 import numpy as np
 
@@ -33,6 +34,72 @@ SKETCH_REGISTRY = {
     "oja": OjaSketch,
     "randomized_svd": RandomizedSVDStream,
 }
+
+
+def _resolve_lambda(
+    algo_cfg: Dict,
+    X: np.ndarray,
+    y: np.ndarray,
+    loss_fn,
+    batch_size: int,
+) -> float:
+    if "lambda_reg" in algo_cfg and isinstance(algo_cfg["lambda_reg"], (int, float)):
+        return float(algo_cfg["lambda_reg"])
+
+    auto_cfg = algo_cfg.get("lambda_auto")
+    if not auto_cfg:
+        raise ValueError("lambda_reg missing and no lambda_auto strategy provided.")
+    batches = int(auto_cfg.get("batches", 10))
+    factor = float(auto_cfg.get("factor", 2.0))
+    max_norm_sq = 0.0
+    weights = np.zeros(X.shape[1])
+    start = 0
+    for _ in range(max(1, batches)):
+        if start >= len(X):
+            break
+        end = min(len(X), start + batch_size)
+        batch_x = X[start:end]
+        batch_y = y[start:end]
+        if batch_x.size == 0:
+            break
+        grad = loss_fn.grad(weights, batch_x, batch_y)
+        max_norm_sq = max(max_norm_sq, float(grad @ grad))
+        start = end
+    if max_norm_sq <= 0.0:
+        max_norm_sq = 1e-6
+    return max(factor * max_norm_sq, 1e-6)
+
+
+def _compute_sketch_stats(
+    gram: np.ndarray, approx_cov: np.ndarray | None, lambda_reg: float
+) -> Dict[str, float] | None:
+    if approx_cov is None:
+        return None
+    if approx_cov.shape != gram.shape:
+        return None
+    sym_diff = 0.5 * (approx_cov - gram + (approx_cov - gram).T)
+    try:
+        diff_eigs = np.linalg.eigvalsh(sym_diff)
+        spectral_error = float(np.max(np.abs(diff_eigs)))
+    except np.linalg.LinAlgError:
+        spectral_error = float(np.linalg.norm(sym_diff, ord="fro"))
+    try:
+        gram_eigs = np.linalg.eigvalsh(gram)
+        lambda_min = float(np.min(gram_eigs))
+    except np.linalg.LinAlgError:
+        lambda_min = 0.0
+    denom = lambda_reg + max(lambda_min, 0.0)
+    if denom <= 0:
+        epsilon = None
+        inflation = None
+    else:
+        epsilon = min(spectral_error / denom, 0.999999)
+        inflation = 1.0 / (1.0 - epsilon)
+    return {
+        "spectral_error": spectral_error,
+        "epsilon_hat": epsilon,
+        "inflation": inflation,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,9 +178,10 @@ def build_optimizer(cfg: Dict, dimension: int):
             raise ValueError(f"Unknown sketch backend {sketch_name}")
         sketch_cls = SKETCH_REGISTRY[sketch_name]
         sketch_kwargs = {k: v for k, v in sketch_cfg.items() if k != "name"}
+        lambda_reg = float(algo_cfg.get("_lambda_resolved", algo_cfg.get("lambda_reg", 1.0)))
         return SAMDSS(
             dim=dimension,
-            lambda_ridge=algo_cfg.get("lambda_reg", 1.0),
+            lambda_ridge=lambda_reg,
             step_schedule=schedule,
             sketch_backend=sketch_cls,
             sketch_kwargs=sketch_kwargs,
@@ -158,6 +226,15 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
     rng = set_global_seeds(seed)
     X, y, extras = build_dataset(cfg)
     loss_fn = build_loss(cfg)
+    train_cfg = cfg["train"]
+    batch_size = train_cfg.get("batch_size", len(X))
+
+    lambda_reg = None
+    if cfg["optimizer"]["name"] == "samd_ss":
+        lambda_reg = _resolve_lambda(cfg["optimizer"], X, y, loss_fn, batch_size)
+        cfg = copy.deepcopy(cfg)
+        cfg["optimizer"]["_lambda_resolved"] = lambda_reg
+
     optimizer = build_optimizer(cfg, dimension=X.shape[1])
     weights = np.zeros(X.shape[1])
     history = [weights.copy()]
@@ -166,9 +243,7 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
     train_losses = []
     track_potential = bool(getattr(optimizer, "supports_potential", False))
 
-    train_cfg = cfg["train"]
     num_epochs = train_cfg.get("epochs", 1)
-    batch_size = train_cfg.get("batch_size", len(X))
 
     for epoch in range(num_epochs):
         for batch_x, batch_y in iterate_minibatches(X, y, batch_size, rng):
@@ -184,6 +259,12 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
 
     observed_regret = float(np.sum(train_losses - train_losses[-1]))
 
+    approx_cov = (
+        optimizer.approximate_covariance()
+        if hasattr(optimizer, "approximate_covariance")
+        else None
+    )
+
     metrics = summarize_metrics(
         cfg=cfg,
         weights_history=np.stack(history),
@@ -194,6 +275,8 @@ def run_training(cfg: Dict, artifacts_dir: Path) -> Dict:
         loss_fn=loss_fn,
         final_weights=weights,
         observed_regret=observed_regret,
+        lambda_reg=lambda_reg,
+        approx_cov=approx_cov,
     )
     save_summary(metrics, artifacts_dir)
     return metrics
@@ -209,20 +292,26 @@ def summarize_metrics(
     loss_fn,
     final_weights: np.ndarray,
     observed_regret: float,
+    lambda_reg: float | None,
+    approx_cov: np.ndarray | None,
 ) -> Dict:
     epsilon = cfg["optimizer"].get("epsilon")
-    lambda_reg = cfg["optimizer"].get("lambda_reg")
-    logdet_value = logdet.logdet_ratio(gram, float(lambda_reg if lambda_reg is not None else 1.0))
+    lambda_value = float(
+        lambda_reg
+        if lambda_reg is not None
+        else cfg["optimizer"].get("lambda_reg", 1.0)
+    )
+    logdet_value = logdet.logdet_ratio(gram, lambda_value)
 
     sum_potential = None
     ellip_ok = None
     regret_result = None
-    if potentials.size > 0 and epsilon is not None and lambda_reg is not None:
+    if potentials.size > 0 and epsilon is not None:
         sum_potential = float(np.sum(potentials))
         ellip_ok = logdet.elliptical_potential_check(sum_potential, logdet_value, float(epsilon))
         regret_result = regret.instance_regret_bound(
             domain_diameter=float(cfg["train"].get("domain_diameter", 1.0)),
-            lambda_reg=float(lambda_reg),
+            lambda_reg=lambda_value,
             epsilon=float(epsilon),
             logdet_ratio=logdet_value,
             observed_regret=observed_regret,
@@ -235,6 +324,12 @@ def summarize_metrics(
     else:
         test_loss = train_losses[-1]
 
+    generalization_gap = None
+    if extras:
+        generalization_gap = float(test_loss - train_losses[-1])
+
+    sketch_stats = _compute_sketch_stats(gram, approx_cov, lambda_value) if approx_cov is not None else None
+
     metrics = {
         "experiment": cfg["name"],
         "elliptical_potential_ok": None if ellip_ok is None else bool(ellip_ok),
@@ -243,11 +338,13 @@ def summarize_metrics(
         "regret_bound": None if regret_result is None else regret_result.bound,
         "regret_satisfied": None if regret_result is None else bool(regret_result.satisfied),
         "stability": stability.path_stability(weights_history),
-        "generalization_gap": stability.generalization_gap(
-            train_losses, np.array([test_loss])
-        ),
+        "generalization_gap": generalization_gap,
         "train_loss_final": float(train_losses[-1]),
         "test_loss": float(test_loss),
+        "lambda_reg": lambda_value,
+        "sketch_spectral_error": None if not sketch_stats else sketch_stats["spectral_error"],
+        "sketch_epsilon_hat": None if not sketch_stats else sketch_stats["epsilon_hat"],
+        "sketch_inflation": None if not sketch_stats else sketch_stats["inflation"],
     }
     return metrics
 
